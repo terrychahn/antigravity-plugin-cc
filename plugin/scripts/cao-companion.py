@@ -17,9 +17,9 @@ import shlex
 import socket
 import subprocess
 import sys
-from pathlib import Path
 import tempfile
 import time
+from pathlib import Path
 from typing import Any, cast
 
 
@@ -78,8 +78,9 @@ _POLL_INTERVAL: float = 0.2
 _AUTOSTART_TIMEOUT: float = 10.0
 
 
-# ponytail: mirrors cao.runtime.workspace EXACTLY (companion cannot import cao);
-# tests/test_companion_socket.py cross-checks the two copies never diverge.
+# ponytail: _state_dir/_resolve_workspace mirror cao.runtime.workspace state_dir/resolve_workspace;
+# _socket_path mirrors cao.runtime.workspace._runtime_socket — all byte-identical (companion cannot
+# import cao); tests/test_companion_socket.py cross-checks the copies never diverge.
 _MARKERS = (".git", ".claude-plugin")
 
 
@@ -121,7 +122,11 @@ def _resolve_workspace() -> Path:
 
 
 def _socket_path() -> Path:
-    return _state_dir(_resolve_workspace()) / "rpc.sock"
+    workspace = _resolve_workspace()
+    digest = hashlib.sha256(str(workspace).encode()).hexdigest()[:16]
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    base = Path(xdg) if xdg else Path("/tmp") / f"cao-{os.getuid()}"
+    return base / f"cao-{digest}.sock"
 
 
 def _send_rpc(
@@ -169,13 +174,17 @@ def _autostart_daemon(sock_path: Path) -> None:
     env["PYTHONPATH"] = os.pathsep.join(
         [_SITE_PACKAGES, env["PYTHONPATH"]] if env.get("PYTHONPATH") else [_SITE_PACKAGES]
     )
-    subprocess.Popen(
-        [sys.executable, "-m", "cao.runtime.daemon"],
-        env=env,
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    state_dir = _state_dir(_resolve_workspace())
+    state_dir.mkdir(parents=True, exist_ok=True)
+    boot_log = state_dir / "daemon-boot.log"
+    with open(boot_log, "a") as boot_log_fh:
+        subprocess.Popen(
+            [sys.executable, "-m", "cao.runtime.daemon"],
+            env=env,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=boot_log_fh,
+        )
     deadline = time.monotonic() + _AUTOSTART_TIMEOUT
     while time.monotonic() < deadline:
         if _is_daemon_alive(sock_path):
@@ -183,7 +192,7 @@ def _autostart_daemon(sock_path: Path) -> None:
         time.sleep(_POLL_INTERVAL)
     print(
         "Antigravity: daemon did not become ready within 10 seconds. "
-        "Check your environment or try again.",
+        f"See {boot_log} for the daemon's error output.",
         flush=True,
     )
     sys.exit(1)

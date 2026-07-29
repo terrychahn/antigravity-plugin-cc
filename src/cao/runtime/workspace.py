@@ -76,5 +76,17 @@ def resolve_workspace() -> Path:
     return _find_root(Path.cwd().resolve())
 
 
+def _runtime_socket(workspace: Path) -> Path:
+    """Runtime-dir socket path — always short (AF_UNIX safe), never under state_dir.
+
+    Uses $XDG_RUNTIME_DIR when set (systemd standard), else /tmp/cao-<uid>.
+    byte-identical copy lives in plugin/scripts/cao-companion.py _socket_path().
+    """
+    digest = hashlib.sha256(str(workspace).encode()).hexdigest()[:16]
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    base = Path(xdg) if xdg else Path("/tmp") / f"cao-{os.getuid()}"
+    return base / f"cao-{digest}.sock"
+
+
 def socket_path() -> Path:
-    return state_dir(resolve_workspace()) / "rpc.sock"
+    return _runtime_socket(resolve_workspace())

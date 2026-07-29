@@ -12,6 +12,7 @@ import pytest
 
 from cao.runtime.approval_waiter import ApprovalWaiter
 from cao.runtime.daemon import compute_state_dir, handle_client
+from cao.runtime import workspace as _ws
 from cao.runtime.digest_generator import DigestGenerator
 from cao.runtime.event_bus import EventBus, make_publish_wrapper
 from cao.runtime.git_diff_collector import GitDiffCollector
@@ -51,7 +52,8 @@ async def daemon_ctx(git_workspace: Path, monkeypatch: pytest.MonkeyPatch):
     # it a project so it doesn't crash with AuthNotConfigured under the hermetic fixture.
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-proj")
     state_dir = compute_state_dir(git_workspace)
-    sock_path = state_dir / "rpc.sock"
+    sock_path = _ws._runtime_socket(git_workspace)
+    sock_path.parent.mkdir(parents=True, exist_ok=True)
 
     waiter = ApprovalWaiter()
     event_bus = EventBus(state_dir)

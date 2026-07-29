@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 from cao.runtime import workspace as ws
-from cao.runtime.daemon import compute_state_dir, handle_client
+from cao.runtime.daemon import handle_client
 from cao.runtime.ipc import FramingError, read_message, write_message
 
 
@@ -228,7 +228,7 @@ async def test_hung_client_does_not_block_others(tmp_path: Path) -> None:
 
 def _daemon_sock() -> Path:
     """Socket path the daemon resolves from the current env (CAO_WORKSPACE)."""
-    return compute_state_dir(ws.resolve_workspace()) / "rpc.sock"
+    return ws.socket_path()
 
 
 def _spawn_daemon() -> subprocess.Popen[bytes]:
@@ -342,6 +342,8 @@ def test_crash_respawn_reconnects_no_orphan(
     sock = _daemon_sock()
 
     # Crash artifact: a bound-then-closed socket file with no listener behind it.
+    # Runtime dir may not exist yet; create it so bind() can succeed.
+    sock.parent.mkdir(parents=True, exist_ok=True)
     stale = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
     stale.bind(str(sock))
     stale.close()

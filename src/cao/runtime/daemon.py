@@ -50,8 +50,8 @@ def compute_state_dir(workspace: Path) -> Path:
 
 
 def socket_path() -> Path:
-    """Compute the Unix socket path, anchored to the project root (BL-21)."""
-    return compute_state_dir(ws.resolve_workspace()) / "rpc.sock"
+    """Compute the Unix socket path (runtime dir, always short for AF_UNIX)."""
+    return ws.socket_path()
 
 
 def _ping(sock_path: Path, timeout: float = 0.5) -> bool:
@@ -538,6 +538,13 @@ async def serve(sock_path: Path) -> None:
     lockfd = os.open(str(state_dir / "daemon.lock"), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(lockfd, fcntl.LOCK_EX)
+        sock_path.parent.mkdir(parents=True, exist_ok=True)
+        sock_path.parent.chmod(0o700)
+        if sock_path.parent.stat().st_uid != os.getuid():
+            raise RuntimeError(
+                f"Socket directory {sock_path.parent} is not owned by current user"
+                f" (uid {os.getuid()}); refusing to bind."
+            )
         # ponytail: flock makes the winner's socket live before the loser pings, so
         # the pong window is ~µs; only pathological scheduler starvation (winner's
         # loop not run within _ping's 0.5s) could still double-bind. Ceiling

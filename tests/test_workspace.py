@@ -111,11 +111,16 @@ def test_blocklisted_broad_root_with_marker_not_anchored(tmp_path: Path, monkeyp
 
 
 def test_state_dir_and_socket_scheme(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """state_dir/socket_path use the slug-hash scheme under CAO_PLUGIN_DATA/state."""
+    """state_dir uses slug-hash scheme; socket_path is in runtime dir, NOT state_dir."""
     monkeypatch.setenv("CAO_PLUGIN_DATA", str(tmp_path))
     monkeypatch.setenv("CAO_WORKSPACE", str(tmp_path / "agy-try"))
-    ws = Path(str(tmp_path / "agy-try"))
-    sd = workspace.state_dir(ws)
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    ws_path = Path(str(tmp_path / "agy-try"))
+    sd = workspace.state_dir(ws_path)
     assert sd.parent == tmp_path / "state"
     assert sd.name.startswith("agy-try-")
-    assert workspace.socket_path() == workspace.state_dir(ws.resolve()) / "rpc.sock"
+    sock = workspace.socket_path()
+    assert not str(sock).startswith(str(sd))
+    assert len(str(sock)) < 100
+    assert sock.name.startswith("cao-")
+    assert sock.suffix == ".sock"

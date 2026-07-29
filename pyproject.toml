@@ -13,7 +13,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
+# ponytail: cap ruff/mypy — unpinned "latest" drifts new default lint/type rules that break CI (same class as the google-antigravity cap). Bump + fix findings in a dedicated tooling PR.
+dev = ["pytest", "pytest-asyncio", "ruff>=0.15,<0.16", "mypy>=2.1,<2.2"]
 sdk = ["google-antigravity>=0.1.5,<0.2"]
 
 [build-system]
