@@ -5,6 +5,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/ko/1.0.0/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-29
+### Fixed
+- Daemon now starts on hosts with a long `$HOME`. The RPC socket moved from `state_dir/rpc.sock` to a short per-user runtime dir (`$XDG_RUNTIME_DIR`, else `/tmp/cao-<uid>`) as `cao-<hash16>.sock`, avoiding the AF_UNIX `sun_path` limit (108 Linux / 104 macOS) that made `bind()` fail (#3, #5). `state_dir` and all persistent data (`--resume` trajectories, events, digests, `shadow.git`, `root` marker) are unchanged.
+- Daemon startup errors are no longer swallowed: the companion routes the daemon subprocess stderr to `<state_dir>/daemon-boot.log`, and the "did not become ready" message points at it.
+### Changed
+- Pin `ruff`/`mypy` dev tools (`ruff>=0.15,<0.16`, `mypy>=2.1,<2.2`) so unpinned "latest" lint/type-rule drift no longer breaks CI.
+
 ## [0.2.0] - 2026-07-23
 ### Added
 - `gemini-3.6-flash` and `gemini-3.5-flash-lite` added to the supported-model allowlist (region `global`); recovery message + README + `/agy:setup` docs updated.
