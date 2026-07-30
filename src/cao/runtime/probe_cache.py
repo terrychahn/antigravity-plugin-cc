@@ -17,11 +17,11 @@ import os
 import tempfile
 from pathlib import Path
 
+from cao.runtime.paths import plugin_data_dir
+
 
 def store_path() -> Path:
-    env_data = os.environ.get("CAO_PLUGIN_DATA")
-    root = Path(env_data) if env_data else Path.home() / ".config" / "cao"
-    return root / "probe_cache.json"
+    return plugin_data_dir() / "probe_cache.json"
 
 
 def _key(project: str | None, model: str, location: str | None) -> str:

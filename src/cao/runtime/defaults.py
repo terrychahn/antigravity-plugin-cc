@@ -14,13 +14,13 @@ import os
 import tempfile
 from pathlib import Path
 
+from cao.runtime.paths import plugin_data_dir
+
 _KNOWN_KEYS = frozenset({"mode", "model", "project", "location"})
 
 
 def store_path() -> Path:
-    env_data = os.environ.get("CAO_PLUGIN_DATA")
-    root = Path(env_data) if env_data else Path.home() / ".config" / "cao"
-    return root / "defaults.json"
+    return plugin_data_dir() / "defaults.json"
 
 
 def load() -> dict[str, str]:

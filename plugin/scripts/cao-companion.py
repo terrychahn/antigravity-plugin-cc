@@ -40,14 +40,28 @@ def _bootstrap_plugin_data(argv: list[str]) -> None:
 
 _bootstrap_plugin_data(sys.argv)
 
-# The SessionStart hook installs the cao backend into "<base>/site-packages". Resolve <base> the
-# SAME way the hook and src/cao/* do — CAO_PLUGIN_DATA else ~/.config/cao — and NEVER via
-# CLAUDE_PLUGIN_DATA: Claude Code exports CLAUDE_PLUGIN_DATA to hooks only, not to slash commands, so
-# relying on it here left the backend unfindable at command time. Put site-packages on sys.path (our
-# own imports) and, in _autostart_daemon, on the daemon subprocess's PYTHONPATH (a sys.path insert
-# does not propagate to a child process).
-_CAO_BASE = os.environ.get("CAO_PLUGIN_DATA") or os.path.join(os.path.expanduser("~"), ".config", "cao")
-_SITE_PACKAGES = os.path.join(_CAO_BASE, "site-packages")
+def _plugin_data_dir() -> Path:
+    """<base> for everything this plugin stores: CAO_PLUGIN_DATA else ~/.config/cao.
+
+    Resolved the SAME way the hook and src/cao/* do, and NEVER via CLAUDE_PLUGIN_DATA:
+    Claude Code exports that to hooks only, not to slash commands, so relying on it here
+    left the backend unfindable at command time.
+
+    Mirror of cao.runtime.paths.plugin_data_dir (this script cannot import cao). $HOME
+    comes first because the hook installs under ${HOME}/.config/cao while Path.home()
+    ignores HOME on Windows; see that module's docstring.
+    """
+    env_data = os.environ.get("CAO_PLUGIN_DATA")
+    if env_data:
+        return Path(env_data)
+    env_home = os.environ.get("HOME")
+    return (Path(env_home) if env_home else Path.home()) / ".config" / "cao"
+
+
+# The SessionStart hook installs the cao backend into "<base>/site-packages". Put it on sys.path
+# (our own imports) and, in _autostart_daemon, on the daemon subprocess's PYTHONPATH (a sys.path
+# insert does not propagate to a child process).
+_SITE_PACKAGES = str(_plugin_data_dir() / "site-packages")
 if os.path.isdir(_SITE_PACKAGES) and _SITE_PACKAGES not in sys.path:
     sys.path.insert(0, _SITE_PACKAGES)
 
@@ -420,8 +434,7 @@ def _handle_setup(argv: list[str]) -> None:
 
     # ponytail: soft-warn only — the key is legitimately exported after setup, before implement
     if data.get("mode") == "gemini_api_key":
-        base = os.environ.get("CAO_PLUGIN_DATA") or str(Path.home() / ".config" / "cao")
-        key_file = Path(base) / "gemini_api_key"
+        key_file = _plugin_data_dir() / "gemini_api_key"
         has_env = bool(os.environ.get("GEMINI_API_KEY"))
         has_file = key_file.is_file()
         # ponytail: probe keychain inline, not via auth._read_keychain — auth.py imports the

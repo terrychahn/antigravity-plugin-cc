@@ -18,6 +18,7 @@ from google.antigravity.models import (  # type: ignore[import-untyped]
 )
 
 from cao.runtime import defaults
+from cao.runtime.paths import plugin_data_dir
 
 _DEFAULT_MODEL = "gemini-3.6-flash"
 _DEFAULT_LOCATION = "global"
@@ -58,8 +59,7 @@ class AuthConfig:
 
 
 def _read_key_file() -> str | None:
-    base = os.environ.get("CAO_PLUGIN_DATA") or str(Path.home() / ".config" / "cao")
-    path = Path(base) / "gemini_api_key"
+    path = plugin_data_dir() / "gemini_api_key"
     try:
         return path.read_text(encoding="utf-8").strip() or None
     except OSError:
@@ -107,6 +107,9 @@ def _resolve_api_key(
 
 
 def _adc_file_path() -> Path:
+    # Deliberately Path.home(), not paths.home(): this is gcloud's file, not ours, so it
+    # follows gcloud. ponytail: gcloud on Windows actually keeps it under %APPDATA%\gcloud,
+    # which this misses — a separate fix from the HOME/USERPROFILE one.
     override = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     return Path(override) if override else Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
 

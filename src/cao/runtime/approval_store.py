@@ -13,13 +13,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from cao.runtime.paths import plugin_data_dir
+
 Scope = Literal["once", "project", "global"]
 
 
 def store_path() -> Path:
-    env_data = os.environ.get("CAO_PLUGIN_DATA")
-    root = Path(env_data) if env_data else Path.home() / ".config" / "cao"
-    return root / "approvals.json"
+    return plugin_data_dir() / "approvals.json"
 
 
 @dataclass
