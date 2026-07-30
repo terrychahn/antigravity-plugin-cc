@@ -13,10 +13,20 @@ CLAUDE_PLUGIN_DATA and never a global PYTHONPATH.
 from __future__ import annotations
 
 import os
+import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 _HOOK = Path(__file__).resolve().parents[1] / "plugin" / "hooks" / "session_start.sh"
+
+# Absolute path, not the bare name: on Windows CreateProcess searches System32 before PATH,
+# so "bash" would launch the WSL stub there instead of the Git Bash that PATH points at.
+_BASH = shutil.which("bash")
+
+pytestmark = pytest.mark.skipif(_BASH is None, reason="no bash on PATH")
 
 
 def test_session_start_installs_to_fixed_base_without_plugin_env(tmp_path: Path) -> None:
@@ -45,7 +55,7 @@ def test_session_start_installs_to_fixed_base_without_plugin_env(tmp_path: Path)
         "CLAUDE_PLUGIN_ROOT": str(proot),
         # deliberately NO CLAUDE_PLUGIN_DATA and NO CAO_PLUGIN_DATA
     }
-    result = subprocess.run(["bash", str(_HOOK)], env=env, capture_output=True, text=True)
+    result = subprocess.run([str(_BASH), str(_HOOK)], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
 
     base = home / ".config" / "cao"
@@ -85,7 +95,7 @@ def test_session_start_bridges_cao_plugin_data_in_hook_context(tmp_path: Path) -
         "CLAUDE_ENV_FILE": str(env_file),
         # deliberately NO CAO_PLUGIN_DATA
     }
-    result = subprocess.run(["bash", str(_HOOK)], env=env, capture_output=True, text=True)
+    result = subprocess.run([str(_BASH), str(_HOOK)], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
 
     # (a) installed into the STANDARD plugin data dir (CLAUDE_PLUGIN_DATA), not ~/.config/cao
@@ -100,7 +110,10 @@ def test_session_start_bridges_cao_plugin_data_in_hook_context(tmp_path: Path) -
     # (b) bridged the namespaced var to slash commands via CLAUDE_ENV_FILE
     bridged = env_file.read_text()
     assert "export CAO_PLUGIN_DATA=" in bridged, f"no CAO_PLUGIN_DATA bridge written; env_file={bridged!r}"
-    assert str(plugin_data) in bridged, f"bridge points elsewhere; env_file={bridged!r}"
+    # The hook writes the value with `printf %q`, so compare what the shell will see after
+    # sourcing, not the escaped literal — a Windows path comes out with every backslash doubled.
+    value = shlex.split(bridged.strip().removeprefix("export "))[0].removeprefix("CAO_PLUGIN_DATA=")
+    assert value == str(plugin_data), f"bridge points elsewhere; env_file={bridged!r}"
 
     # (c) #338-safe: never leak the reserved var or a global PYTHONPATH into the session env file
     assert "export CLAUDE_PLUGIN_DATA=" not in bridged, "leaked reserved CLAUDE_PLUGIN_DATA (codex #338)"
