@@ -497,6 +497,13 @@ def _render(response: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    # Windows encodes stdout with the locale codec (cp1252 on a US install), so a digest or a
+    # status line carrying → or ⚠ dies with UnicodeEncodeError before the user sees it; piping
+    # does not help. Done here rather than at import because tests import this module and must
+    # not have the host process's streams rewritten under them.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     if len(sys.argv) < 2:
         print("Usage: cao-companion.py <method> [args...]", file=sys.stderr)
         sys.exit(1)
