@@ -247,19 +247,29 @@ class SessionManager:
         without an explicit id (e.g. cancel with {} — Task 004 §RPC)."""
         return next(iter(self._active.values()), None)
 
+    def _by_creation(self) -> list[Session]:
+        """Sessions oldest-first, ties broken by insertion order.
+
+        created_at is not a unique key: the Windows system clock advances in ~15ms
+        steps, so two sessions started back to back carry the identical timestamp.
+        _sessions is a dict, so its iteration order is insertion order and a later
+        insertion did happen later; sorted() is stable, which carries that through.
+        max() would not — on a tie it returns the FIRST maximal element, i.e. the
+        oldest of the group, making latest_session_id() pick the wrong retry target.
+        """
+        return sorted(self._sessions.values(), key=lambda s: s.created_at)
+
     def latest_session_id(self) -> str | None:
         """The most-recently-created session id, or None. Used to resolve the
         retry target when no id is supplied; persists after the session leaves
         _active on completion (so a finished session is still retryable)."""
         if not self._sessions:
             return None
-        return max(self._sessions.values(), key=lambda s: s.created_at).session_id
+        return self._by_creation()[-1].session_id
 
     def list_sessions(self) -> list[dict[str, str]]:
         """All known sessions as {session_id, state} dicts, newest first."""
-        ordered = sorted(
-            self._sessions.values(), key=lambda s: s.created_at, reverse=True
-        )
+        ordered = reversed(self._by_creation())
         return [{"session_id": s.session_id, "state": s.state} for s in ordered]
 
     async def cancel_session(self, session_id: str) -> None:
