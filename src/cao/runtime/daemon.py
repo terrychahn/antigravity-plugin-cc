@@ -11,7 +11,6 @@ Socket path is derived from the workspace slug-hash scheme defined in
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
 import logging
 import os
@@ -25,6 +24,7 @@ from cao.runtime import approval_store, workspace as ws
 from cao.runtime.approval_waiter import ApprovalWaiter, UnknownCallIdError
 from cao.runtime.auth import AuthNotConfigured, resolve_auth
 from cao.runtime.compat import check_model
+from cao.runtime.filelock import exclusive_lock
 from cao.runtime.ipc import write_message
 from cao.runtime.probe import check_region_available
 from cao.runtime.multimodal import AttachmentError, resolve_attachments
@@ -532,12 +532,10 @@ async def serve(sock_path: Path) -> None:
             except ValueError:
                 pass
 
-    # BL-24: serialize cold starts under an flock so two near-simultaneous starts
-    # can never both bind. Release the lock right after binding — holding it for the
-    # daemon lifetime would deadlock the next start.
-    lockfd = os.open(str(state_dir / "daemon.lock"), os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(lockfd, fcntl.LOCK_EX)
+    # BL-24: serialize cold starts under an exclusive file lock so two near-simultaneous
+    # starts can never both bind. Release the lock right after binding — holding it for
+    # the daemon lifetime would deadlock the next start.
+    with exclusive_lock(state_dir / "daemon.lock"):
         sock_path.parent.mkdir(parents=True, exist_ok=True)
         sock_path.parent.chmod(0o700)
         if sock_path.parent.stat().st_uid != os.getuid():
@@ -545,7 +543,7 @@ async def serve(sock_path: Path) -> None:
                 f"Socket directory {sock_path.parent} is not owned by current user"
                 f" (uid {os.getuid()}); refusing to bind."
             )
-        # ponytail: flock makes the winner's socket live before the loser pings, so
+        # ponytail: the lock makes the winner's socket live before the loser pings, so
         # the pong window is ~µs; only pathological scheduler starvation (winner's
         # loop not run within _ping's 0.5s) could still double-bind. Ceiling
         # accepted; upgrade path: yield on connect-success (drop the pong wait).
@@ -555,8 +553,6 @@ async def serve(sock_path: Path) -> None:
         sock_path.unlink(missing_ok=True)  # only-if-stale, guarded by the lock
         (state_dir / "root").touch()  # BL-21: mark this resolved workspace a deliberate root
         server = await asyncio.start_unix_server(_client_factory, path=str(sock_path))
-    finally:
-        os.close(lockfd)
 
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, shutdown.set)
