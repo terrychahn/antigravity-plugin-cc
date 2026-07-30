@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 
@@ -76,16 +77,29 @@ def resolve_workspace() -> Path:
     return _find_root(Path.cwd().resolve())
 
 
-def _runtime_socket(workspace: Path) -> Path:
-    """Runtime-dir socket path — always short (AF_UNIX safe), never under state_dir.
+def _runtime_base() -> Path:
+    """Directory the socket lives in: $XDG_RUNTIME_DIR, else per-user and short.
 
-    Uses $XDG_RUNTIME_DIR when set (systemd standard), else /tmp/cao-<uid>.
-    byte-identical copy lives in plugin/scripts/cao-companion.py _socket_path().
+    POSIX namespaces a shared /tmp by uid. Windows has neither /tmp nor os.getuid(),
+    and does not need the uid: gettempdir() there follows %TEMP%, which is already
+    per-user (C:\\Users\\<name>\\AppData\\Local\\Temp). POSIX keeps /tmp rather than
+    also switching to gettempdir(), which honors $TMPDIR — macOS points that at a
+    ~50-char /var/folders/... path, eating most of the sun_path headroom #3 restored.
+
+    byte-identical copy lives in plugin/scripts/cao-companion.py _runtime_base().
     """
-    digest = hashlib.sha256(str(workspace).encode()).hexdigest()[:16]
     xdg = os.environ.get("XDG_RUNTIME_DIR")
-    base = Path(xdg) if xdg else Path("/tmp") / f"cao-{os.getuid()}"
-    return base / f"cao-{digest}.sock"
+    if xdg:
+        return Path(xdg)
+    if sys.platform == "win32":
+        return Path(tempfile.gettempdir())
+    return Path("/tmp") / f"cao-{os.getuid()}"
+
+
+def _runtime_socket(workspace: Path) -> Path:
+    """Runtime-dir socket path — always short (AF_UNIX safe), never under state_dir."""
+    digest = hashlib.sha256(str(workspace).encode()).hexdigest()[:16]
+    return _runtime_base() / f"cao-{digest}.sock"
 
 
 def socket_path() -> Path:

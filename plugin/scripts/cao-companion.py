@@ -121,12 +121,21 @@ def _resolve_workspace() -> Path:
     return start
 
 
+def _runtime_base() -> Path:
+    # Byte-behavioral mirror of cao.runtime.workspace._runtime_base; see that docstring
+    # for why Windows uses gettempdir() and POSIX deliberately does not.
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg:
+        return Path(xdg)
+    if sys.platform == "win32":
+        return Path(tempfile.gettempdir())
+    return Path("/tmp") / f"cao-{os.getuid()}"
+
+
 def _socket_path() -> Path:
     workspace = _resolve_workspace()
     digest = hashlib.sha256(str(workspace).encode()).hexdigest()[:16]
-    xdg = os.environ.get("XDG_RUNTIME_DIR")
-    base = Path(xdg) if xdg else Path("/tmp") / f"cao-{os.getuid()}"
-    return base / f"cao-{digest}.sock"
+    return _runtime_base() / f"cao-{digest}.sock"
 
 
 def _send_rpc(

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
+import tempfile
 from pathlib import Path
 from types import ModuleType
 
@@ -107,19 +109,28 @@ def test_parity_with_xdg_runtime_dir(
     assert daemon.socket_path() == Path(companion._socket_path())
     sock = daemon.socket_path()
     assert str(sock).startswith(str(tmp_path / "runtime"))
-    assert len(str(sock)) < 100
+    # No length assertion here: the caller supplied the directory, so its length is the
+    # environment's property, not the code's. The other tests unset XDG_RUNTIME_DIR and
+    # do assert it, which is where the AF_UNIX sun_path cap is actually ours to keep.
 
 
 def test_parity_without_xdg_runtime_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Daemon and companion agree when XDG_RUNTIME_DIR is unset (falls back to /tmp/cao-<uid>)."""
+    """Daemon and companion agree when XDG_RUNTIME_DIR is unset.
+
+    The fallback is per-user on both platforms, but gets there differently: POSIX
+    namespaces a shared /tmp by uid, Windows inherits a per-user %TEMP%.
+    """
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     monkeypatch.setenv("CAO_WORKSPACE", str(tmp_path / "proj"))
     monkeypatch.delenv("CAO_PLUGIN_DATA", raising=False)
     assert daemon.socket_path() == Path(companion._socket_path())
     sock = daemon.socket_path()
-    assert f"cao-{os.getuid()}" in str(sock)
+    if sys.platform == "win32":
+        assert sock.parent == Path(tempfile.gettempdir())
+    else:
+        assert f"cao-{os.getuid()}" in str(sock)
     assert len(str(sock)) < 100
 
 
