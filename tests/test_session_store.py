@@ -60,4 +60,5 @@ def test_trajectory_dir_is_stable_and_created() -> None:
     second = session_store.trajectory_dir(ws, "sess-x")
     assert first == second
     assert Path(first).is_dir()
-    assert first.endswith("trajectories/sess-x")
+    # Compare path parts, not a "/"-joined literal: the separator is "\" on Windows.
+    assert Path(first).parts[-2:] == ("trajectories", "sess-x")
