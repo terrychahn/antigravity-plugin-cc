@@ -45,7 +45,11 @@ def _stub_cao(site_packages: Path, sentinel: Path) -> None:
         "import json, os, pathlib\n"
         f"_SENTINEL = {str(sentinel)!r}\n"
         "def store_path():\n"
-        "    base = os.environ.get('CAO_PLUGIN_DATA') or os.path.expanduser('~/.config/cao')\n"
+        # Mirrors cao.runtime.paths.plugin_data_dir: $HOME first. expanduser('~') would not do —
+        # on Windows it reads USERPROFILE, and with only HOME set it returns '~' unexpanded,
+        # leaving a literal '~' directory under the cwd.
+        "    home = os.environ.get('HOME') or os.path.expanduser('~')\n"
+        "    base = os.environ.get('CAO_PLUGIN_DATA') or os.path.join(home, '.config', 'cao')\n"
         "    return pathlib.Path(base) / 'defaults.json'\n"
         "def save(data):\n"
         "    open(_SENTINEL, 'w').write('used')\n"
