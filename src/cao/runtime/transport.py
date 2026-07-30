@@ -38,14 +38,30 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Protocol, cast
 
+if sys.platform == "win32":
+    import _winapi
+    import msvcrt
+
 # Every branch below tests ``sys.platform`` literally rather than a module-level constant.
 # That is not a style choice: mypy only narrows platform-specific code on a direct comparison
 # against the literal, and this module by design names APIs that exist on one OS and not the
 # other (AF_UNIX, start_serving_pipe). Routed through a constant, --strict reports nine
 # attr-defined errors here and the only cure is nine ``type: ignore``s. CI must run the suite
 # on both platforms for each half to be checked.
+#
+# The SHAPE of the guard matters as much as the literal, and only for one of the two error
+# classes. Unreachable code is still name-resolved, so a bare name that exists on one OS only
+# (_winapi, msvcrt, or a string annotation naming asyncio.ProactorEventLoop) is a name-defined
+# error even when the platform check has already returned or raised. An *attribute* access
+# like socket.AF_UNIX is fine there, because attr-defined is reported in the later type-check
+# pass, which skips unreachable code. Cure: put each platform's body inside a POSITIVE
+# ``if sys.platform == "<os>":`` block, which mypy drops wholesale when checking the other.
+# Do not "simplify" these into early returns -- that is how the Linux CI job goes red.
 
 ClientHandler = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Coroutine[Any, Any, None]]
+
+# ERROR_PIPE_BUSY: every pipe instance is already serving another client. Transient.
+_ERROR_PIPE_BUSY = 231
 
 
 class Server(Protocol):
@@ -138,22 +154,21 @@ class _PipeServer:
 async def serve(handler: ClientHandler, sock_path: Path) -> Server:
     """Listen on *sock_path*'s endpoint, calling *handler* per connection."""
     addr = address(sock_path)
-    if sys.platform != "win32":
-        return await asyncio.start_unix_server(handler, path=addr)
+    if sys.platform == "win32":
+        loop = asyncio.get_running_loop()
 
-    loop = asyncio.get_running_loop()
+        def factory() -> asyncio.StreamReaderProtocol:
+            reader = asyncio.StreamReader(loop=loop)
+            return asyncio.StreamReaderProtocol(reader, handler, loop=loop)
 
-    def factory() -> asyncio.StreamReaderProtocol:
-        reader = asyncio.StreamReader(loop=loop)
-        return asyncio.StreamReaderProtocol(reader, handler, loop=loop)
-
-    # Pipe I/O lives on ProactorEventLoop, not the AbstractEventLoop get_running_loop()
-    # advertises; it is the Windows default, and a SelectorEventLoop cannot serve a pipe at
-    # all, so the cast documents a real precondition rather than papering over a maybe.
-    proactor = cast("asyncio.ProactorEventLoop", loop)
-    # Same protocol object start_unix_server builds internally, so the handler receives an
-    # identical (StreamReader, StreamWriter) pair on both platforms.
-    return _PipeServer(await proactor.start_serving_pipe(factory, addr))
+        # Pipe I/O lives on ProactorEventLoop, not the AbstractEventLoop get_running_loop()
+        # advertises; it is the Windows default, and a SelectorEventLoop cannot serve a pipe
+        # at all, so the cast documents a real precondition rather than papering over a maybe.
+        proactor = cast("asyncio.ProactorEventLoop", loop)
+        # Same protocol object start_unix_server builds internally, so the handler receives
+        # an identical (StreamReader, StreamWriter) pair on both platforms.
+        return _PipeServer(await proactor.start_serving_pipe(factory, addr))
+    return await asyncio.start_unix_server(handler, path=addr)
 
 
 # ---------------------------------------------------------------------------
@@ -164,15 +179,14 @@ async def serve(handler: ClientHandler, sock_path: Path) -> Server:
 async def open_connection(sock_path: Path) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Connect to *sock_path*'s endpoint. Raises OSError when nothing is listening."""
     addr = address(sock_path)
-    if sys.platform != "win32":
-        return await asyncio.open_unix_connection(addr)
-
-    loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader(loop=loop)
-    protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
-    proactor = cast("asyncio.ProactorEventLoop", loop)  # see serve()
-    transport, _ = await proactor.create_pipe_connection(lambda: protocol, addr)
-    return reader, asyncio.StreamWriter(transport, protocol, reader, loop)
+    if sys.platform == "win32":
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader(loop=loop)
+        protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
+        proactor = cast("asyncio.ProactorEventLoop", loop)  # see serve()
+        transport, _ = await proactor.create_pipe_connection(lambda: protocol, addr)
+        return reader, asyncio.StreamWriter(transport, protocol, reader, loop)
+    return await asyncio.open_unix_connection(addr)
 
 
 def request_sync(sock_path: Path, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
@@ -215,22 +229,50 @@ def _pipe_roundtrip(addr: str, line: bytes, timeout: float) -> bytes:
     # someone else the open fails with ERROR_PIPE_BUSY, which is transient, unlike the
     # FileNotFoundError raised when no daemon is listening at all. Retry only the former,
     # so "no daemon" still fails fast instead of burning the whole timeout.
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            handle = open(addr, "r+b", buffering=0)
-            break
-        except OSError as exc:
-            if getattr(exc, "winerror", None) != 231 or time.monotonic() >= deadline:
-                raise
-            time.sleep(0.01)
-    with handle:
-        handle.write(line)
-        handle.flush()
-        buf = b""
-        while b"\n" not in buf:
-            chunk = handle.read(4096)
-            if not chunk:
+    #
+    # CreateFile, not the builtin open(): open() reaches the pipe through the CRT's _wopen,
+    # which translates the Win32 code into a CRT errno and DROPS .winerror -- ERROR_PIPE_BUSY
+    # arrives as a bare EINVAL, so the retry below never fires and contention becomes a hard
+    # failure. _winapi raises the Win32 code verbatim (and still maps ERROR_FILE_NOT_FOUND to
+    # FileNotFoundError, which _is_daemon_alive depends on).
+    #
+    # The body sits inside a POSITIVE ``sys.platform == "win32"`` block, as in filelock.py:
+    # mypy drops such a block wholesale when checking for the other platform, whereas code
+    # merely following an early ``raise`` is still name-resolved and every _winapi/msvcrt
+    # reference becomes a name-defined error on the Linux CI runner.
+    if sys.platform == "win32":
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                pipe = _winapi.CreateFile(
+                    addr,
+                    _winapi.GENERIC_READ | _winapi.GENERIC_WRITE,
+                    0,
+                    _winapi.NULL,
+                    _winapi.OPEN_EXISTING,
+                    0,
+                    _winapi.NULL,
+                )
                 break
-            buf += chunk
-    return buf
+            except OSError as exc:
+                if exc.winerror != _ERROR_PIPE_BUSY or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
+        # open_osfhandle hands ownership of the pipe to the fd, so closing the file object
+        # closes it exactly once; until that succeeds the handle is still ours to release.
+        try:
+            fd = msvcrt.open_osfhandle(pipe, os.O_BINARY)
+        except OSError:
+            _winapi.CloseHandle(pipe)
+            raise
+        with open(fd, "r+b", buffering=0) as handle:
+            handle.write(line)
+            handle.flush()
+            buf = b""
+            while b"\n" not in buf:
+                chunk = handle.read(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        return buf
+    raise RuntimeError("no named pipes on POSIX")  # request_sync routes here only on Windows

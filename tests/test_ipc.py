@@ -21,6 +21,7 @@ import os
 import socket as _socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -316,6 +317,81 @@ def test_cold_start_second_instance_yields_to_live_daemon(
             _terminate(d2)
     finally:
         _terminate(d1)
+
+
+# ---------------------------------------------------------------------------
+# Windows: contention on the pipe must be retried, not surfaced to the caller.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason=(
+        "ERROR_PIPE_BUSY is a Windows-only condition. A domain socket has a listen "
+        "backlog, so a POSIX client queues instead of being refused and there is no "
+        "transient error to retry."
+    ),
+)
+def test_pipe_contention_is_retried_not_raised(tmp_path: Path) -> None:
+    """Clients that collide on a saturated pipe are retried, never failed.
+
+    Regression guard: _pipe_roundtrip used to open the pipe with the builtin open(),
+    whose CRT layer translates the Win32 code to an errno and discards .winerror. That
+    made ERROR_PIPE_BUSY arrive as a bare EINVAL, so the retry never fired and ordinary
+    contention became a hard OSError. Verified to fail ~280/360 requests before the fix.
+    """
+    sock_path = tmp_path / "contention.sock"
+    ready = threading.Event()
+    stop = threading.Event()
+
+    async def slow_echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Holding the instance is what forces later clients into ERROR_PIPE_BUSY.
+        line = await reader.readline()
+        await asyncio.sleep(0.02)
+        writer.write(line)
+        await writer.drain()
+        writer.close()
+
+    def serve_until_stopped() -> None:
+        async def main() -> None:
+            server = await transport.serve(slow_echo, sock_path)
+            ready.set()
+            while not stop.is_set():
+                await asyncio.sleep(0.01)
+            server.close()
+
+        asyncio.run(main())
+
+    server_thread = threading.Thread(target=serve_until_stopped, daemon=True)
+    server_thread.start()
+    assert ready.wait(10), "pipe server did not come up"
+
+    errors: list[OSError] = []
+    lock = threading.Lock()
+    request = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+
+    def hammer() -> None:
+        for _ in range(10):
+            try:
+                transport.request_sync(sock_path, request, 5.0)
+            except OSError as exc:
+                with lock:
+                    errors.append(exc)
+
+    workers = [threading.Thread(target=hammer) for _ in range(16)]
+    try:
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=60)
+    finally:
+        stop.set()
+        server_thread.join(timeout=5)
+
+    assert not errors, (
+        f"{len(errors)}/160 requests failed under pipe contention; the ERROR_PIPE_BUSY "
+        f"retry did not fire. First failure: {errors[0]!r}"
+    )
 
 
 @pytest.mark.skipif(

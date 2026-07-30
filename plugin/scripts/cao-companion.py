@@ -179,16 +179,36 @@ def _roundtrip(sock_path: Path, line: bytes, timeout: float = 5.0) -> bytes:
     # ERROR_PIPE_BUSY (231) means the daemon is mid-handshake with another client and is
     # transient; FileNotFoundError means no daemon, which must stay a fast failure because
     # _is_daemon_alive polls this during autostart.
+    #
+    # CreateFile, not the builtin open(): open() goes through the CRT's _wopen, which turns
+    # the Win32 code into a CRT errno and drops .winerror, so ERROR_PIPE_BUSY would arrive as
+    # a bare EINVAL and the retry below would never fire.
+    import _winapi
+    import msvcrt
+
     deadline = time.monotonic() + timeout
     while True:
         try:
-            handle = open(addr, "r+b", buffering=0)
+            pipe = _winapi.CreateFile(
+                addr,
+                _winapi.GENERIC_READ | _winapi.GENERIC_WRITE,
+                0,
+                _winapi.NULL,
+                _winapi.OPEN_EXISTING,
+                0,
+                _winapi.NULL,
+            )
             break
         except OSError as exc:
-            if getattr(exc, "winerror", None) != 231 or time.monotonic() >= deadline:
+            if exc.winerror != 231 or time.monotonic() >= deadline:
                 raise
             time.sleep(0.01)
-    with handle:
+    try:
+        fd = msvcrt.open_osfhandle(pipe, os.O_BINARY)
+    except OSError:
+        _winapi.CloseHandle(pipe)
+        raise
+    with open(fd, "r+b", buffering=0) as handle:
         handle.write(line)
         handle.flush()
         buf = b""
