@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from cao.runtime import transport
 from cao.runtime import session_store
 from cao.runtime.approval_waiter import ApprovalWaiter
 from cao.runtime.daemon import handle_client
@@ -152,14 +153,14 @@ async def _run_implement(
     tmp_path: Path, mgr: SessionManager, params: dict[str, Any]
 ) -> dict[str, Any]:
     sock = tmp_path / "d.sock"
-    server = await asyncio.start_unix_server(
+    server = await transport.serve(
         lambda r, w: handle_client(
             r, w, asyncio.Event(), session_manager=mgr, approval_waiter=ApprovalWaiter()
         ),
-        path=str(sock),
+        sock,
     )
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock))
+        r, w = await transport.open_connection(sock)
         await write_message(
             w,
             {"jsonrpc": "2.0", "id": 1, "method": "session.implement", "params": params},
@@ -215,7 +216,8 @@ async def test_implement_fresh_ignores_stored_state(
     cfg = captured["config"]
     assert cfg.conversation_id is None
     assert cfg.save_dir != stored_dir
-    assert cfg.save_dir.endswith("/trajectories/" + _last_session_id(mgr))
+    # Compare path parts, not a "/"-joined literal: the separator is "\" on Windows.
+    assert Path(cfg.save_dir).parts[-2:] == ("trajectories", _last_session_id(mgr))
 
 
 def _last_session_id(mgr: SessionManager) -> str:

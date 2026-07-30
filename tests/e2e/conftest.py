@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from cao.runtime import transport
 from cao.runtime.approval_waiter import ApprovalWaiter
 from cao.runtime.daemon import compute_state_dir, handle_client
 from cao.runtime import workspace as _ws
@@ -89,9 +90,9 @@ async def daemon_ctx(git_workspace: Path, monkeypatch: pytest.MonkeyPatch):
     )
     session_evt = asyncio.Event()
 
-    server = await asyncio.start_unix_server(
+    server = await transport.serve(
         lambda r, w: handle_client(r, w, session_evt, session_manager=mgr, approval_waiter=waiter),
-        path=str(sock_path),
+        sock_path,
     )
 
     yield SimpleNamespace(
@@ -118,7 +119,7 @@ async def daemon_ctx(git_workspace: Path, monkeypatch: pytest.MonkeyPatch):
 @pytest.fixture
 async def ipc_client(daemon_ctx: SimpleNamespace):
     """Async JSON-RPC client connected to the in-process server."""
-    reader, writer = await asyncio.open_unix_connection(str(daemon_ctx.sock_path))
+    reader, writer = await transport.open_connection(daemon_ctx.sock_path)
     _id = 0
 
     async def call(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:

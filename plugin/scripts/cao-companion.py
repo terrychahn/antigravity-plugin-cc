@@ -152,6 +152,54 @@ def _socket_path() -> Path:
     return _runtime_base() / f"cao-{digest}.sock"
 
 
+def _endpoint(sock_path: Path) -> str:
+    # Byte-behavioral mirror of cao.runtime.transport.address; see that module's docstring
+    # for why Windows cannot use a domain socket and what the pipe ACL replaces.
+    if sys.platform != "win32":
+        return str(sock_path)
+    digest = hashlib.sha256(str(sock_path).encode()).hexdigest()[:16]
+    return r"\\.\pipe\cao-" + digest
+
+
+def _roundtrip(sock_path: Path, line: bytes, timeout: float = 5.0) -> bytes:
+    # Mirror of cao.runtime.transport._unix_roundtrip / _pipe_roundtrip.
+    addr = _endpoint(sock_path)
+    if sys.platform != "win32":
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.connect(addr)
+            s.sendall(line)
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        return buf
+
+    # ERROR_PIPE_BUSY (231) means the daemon is mid-handshake with another client and is
+    # transient; FileNotFoundError means no daemon, which must stay a fast failure because
+    # _is_daemon_alive polls this during autostart.
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            handle = open(addr, "r+b", buffering=0)
+            break
+        except OSError as exc:
+            if getattr(exc, "winerror", None) != 231 or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+    with handle:
+        handle.write(line)
+        handle.flush()
+        buf = b""
+        while b"\n" not in buf:
+            chunk = handle.read(4096)
+            if not chunk:
+                break
+            buf += chunk
+    return buf
+
+
 def _send_rpc(
     sock_path: Path,
     method: str,
@@ -165,15 +213,8 @@ def _send_rpc(
         "method": method,
         "params": params,
     }
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-        s.connect(str(sock_path))
-        s.sendall(json.dumps(request).encode() + b"\n")
-        buf = b""
-        while b"\n" not in buf:
-            chunk = s.recv(4096)
-            if not chunk:
-                break
-            buf += chunk
+    line = json.dumps(request).encode() + b"\n"
+    buf = _roundtrip(sock_path, line)
     raw: Any = json.loads(buf.split(b"\n")[0])
     if not isinstance(raw, dict):
         raise ValueError(f"Unexpected response type: {type(raw)}")

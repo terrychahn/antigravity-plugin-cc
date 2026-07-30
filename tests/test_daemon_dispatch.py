@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from cao.runtime import transport
 from cao.runtime.approval_waiter import ApprovalWaiter
 from cao.runtime.daemon import handle_client
 from cao.runtime.ipc import read_message, write_message
@@ -40,7 +41,7 @@ async def _dispatch(
     """Send one JSON-RPC request to a handle_client server wired to *mgr*."""
     sock = tmp_path / "dispatch.sock"
     sock.unlink(missing_ok=True)
-    server = await asyncio.start_unix_server(
+    server = await transport.serve(
         lambda r, w: handle_client(
             r,
             w,
@@ -49,10 +50,10 @@ async def _dispatch(
             approval_waiter=waiter or ApprovalWaiter(),
             shutdown_event=shutdown_event,
         ),
-        path=str(sock),
+        sock,
     )
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock))
+        r, w = await transport.open_connection(sock)
         await write_message(
             w, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
         )

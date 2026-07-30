@@ -1,11 +1,13 @@
-"""asyncio Unix socket server with JSON-RPC 2.0 dispatch and broker pattern.
+"""asyncio JSON-RPC 2.0 server with dispatch and broker pattern.
 
 Entry point::
 
     CAO_WORKSPACE=$(pwd) python -m cao.runtime.daemon
 
 Socket path is derived from the workspace slug-hash scheme defined in
-``event_bus_and_persistence.md §7``.
+``event_bus_and_persistence.md §7``. What that path means at the OS level is
+``cao.runtime.transport``'s business: a Unix domain socket on POSIX, a named pipe on
+Windows. This module only ever sees ``(StreamReader, StreamWriter)``.
 """
 
 from __future__ import annotations
@@ -15,12 +17,12 @@ import json
 import logging
 import os
 import signal
-import socket
+import sys
 from pathlib import Path
 from typing import Any, cast
 
 from cao.models import ApprovalDecision
-from cao.runtime import approval_store, workspace as ws
+from cao.runtime import approval_store, transport, workspace as ws
 from cao.runtime.approval_waiter import ApprovalWaiter, UnknownCallIdError
 from cao.runtime.auth import AuthNotConfigured, resolve_auth
 from cao.runtime.compat import check_model
@@ -50,7 +52,7 @@ def compute_state_dir(workspace: Path) -> Path:
 
 
 def socket_path() -> Path:
-    """Compute the Unix socket path (runtime dir, always short for AF_UNIX)."""
+    """Compute the socket path (runtime dir, always short for AF_UNIX)."""
     return ws.socket_path()
 
 
@@ -62,20 +64,14 @@ def _ping(sock_path: Path, timeout: float = 0.5) -> bool:
     daemon" (mirrors the companion's ``_is_daemon_alive``).
     """
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(timeout)
-            client.connect(str(sock_path))
-            client.sendall(b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}\n')
-            buf = b""
-            while b"\n" not in buf:
-                chunk = client.recv(4096)
-                if not chunk:
-                    break
-                buf += chunk
-        raw: Any = json.loads(buf.split(b"\n")[0])
+        raw = transport.request_sync(
+            sock_path,
+            {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}},
+            timeout,
+        )
     except (OSError, ValueError):
         return False
-    return isinstance(raw, dict) and bool(raw.get("result") == "pong")
+    return bool(raw.get("result") == "pong")
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +479,39 @@ async def handle_client(
 # ---------------------------------------------------------------------------
 
 
+def _install_shutdown_handlers(shutdown: asyncio.Event) -> None:
+    """Set *shutdown* when the OS asks the daemon to stop. Best-effort.
+
+    Not the primary shutdown path — that is the ``session.shutdown`` RPC — so a platform
+    that refuses a given signal costs nothing.
+
+    POSIX uses the loop's own handler, which is already safe to call from the loop.
+    Windows has no ``add_signal_handler`` on the ProactorEventLoop and never delivers
+    SIGTERM at all; ``signal.signal`` runs its handler in the main thread outside the
+    loop, so setting the event has to be bounced back in with ``call_soon_threadsafe``.
+    Either API raises when called off the main thread (embedded/test use), which is not
+    an error worth failing a start over.
+    """
+    loop = asyncio.get_running_loop()
+    if sys.platform != "win32":
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, shutdown.set)
+            except (NotImplementedError, RuntimeError, ValueError):
+                logger.debug("no handler for %s; relying on session.shutdown", sig)
+        return
+
+    def _request_stop(_signum: int, _frame: Any) -> None:
+        loop.call_soon_threadsafe(shutdown.set)
+
+    # SIGBREAK is Ctrl+Break; SIGTERM is a defined constant on Windows but is never raised.
+    for sig in (signal.SIGINT, signal.SIGBREAK):
+        try:
+            signal.signal(sig, _request_stop)
+        except (OSError, ValueError):
+            logger.debug("no handler for %s; relying on session.shutdown", sig)
+
+
 async def serve(sock_path: Path) -> None:
     """Bind *sock_path*, accept clients, and run until SIGTERM/SIGINT."""
     session_event: asyncio.Event = asyncio.Event()
@@ -536,31 +565,28 @@ async def serve(sock_path: Path) -> None:
     # starts can never both bind. Release the lock right after binding — holding it for
     # the daemon lifetime would deadlock the next start.
     with exclusive_lock(state_dir / "daemon.lock"):
-        sock_path.parent.mkdir(parents=True, exist_ok=True)
-        sock_path.parent.chmod(0o700)
-        if sock_path.parent.stat().st_uid != os.getuid():
-            raise RuntimeError(
-                f"Socket directory {sock_path.parent} is not owned by current user"
-                f" (uid {os.getuid()}); refusing to bind."
-            )
+        transport.prepare(sock_path)
+        transport.verify_owner(sock_path)
         # ponytail: the lock makes the winner's socket live before the loser pings, so
         # the pong window is ~µs; only pathological scheduler starvation (winner's
         # loop not run within _ping's 0.5s) could still double-bind. Ceiling
         # accepted; upgrade path: yield on connect-success (drop the pong wait).
         if _ping(sock_path, timeout=2.0):
-            logger.info("daemon already serving %s; yielding", sock_path)
+            logger.info("daemon already serving %s; yielding", transport.address(sock_path))
             return
-        sock_path.unlink(missing_ok=True)  # only-if-stale, guarded by the lock
+        transport.cleanup(sock_path)  # only-if-stale, guarded by the lock
         (state_dir / "root").touch()  # BL-21: mark this resolved workspace a deliberate root
-        server = await asyncio.start_unix_server(_client_factory, path=str(sock_path))
+        server = await transport.serve(_client_factory, sock_path)
 
-    loop = asyncio.get_running_loop()
-    loop.add_signal_handler(signal.SIGTERM, shutdown.set)
-    loop.add_signal_handler(signal.SIGINT, shutdown.set)
+    # The address, not the socket path: on Windows the two differ and only the address names
+    # something that exists. address() is the identity itself on POSIX, so output is unchanged.
+    logger.info("daemon listening at %s", transport.address(sock_path))
 
-    logger.info("daemon listening at %s", sock_path)
-
+    # Inside the try: a failure installing handlers must still run the teardown below,
+    # or the daemon leaves a bound endpoint behind and the next start finds a socket
+    # that nothing answers on.
     try:
+        _install_shutdown_handlers(shutdown)
         await shutdown.wait()
     finally:
         logger.info("shutdown: closing %d open connection(s)", len(open_writers))
@@ -571,8 +597,10 @@ async def serve(sock_path: Path) -> None:
             except OSError:
                 pass
         await server.wait_closed()
-        sock_path.unlink(missing_ok=True)
-        logger.info("socket removed; daemon stopped")
+        transport.cleanup(sock_path)
+        # "released", not "removed": POSIX unlinks the socket file, Windows has the kernel
+        # reclaim the pipe with the process. True either way; "removed" was only true on POSIX.
+        logger.info("endpoint released; daemon stopped")
 
 
 def main() -> None:

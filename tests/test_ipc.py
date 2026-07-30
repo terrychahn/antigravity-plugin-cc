@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from cao.runtime import transport
 from cao.runtime import workspace as ws
 from cao.runtime.daemon import handle_client
 from cao.runtime.ipc import FramingError, read_message, write_message
@@ -47,9 +48,9 @@ async def _start_server(
     session_event: asyncio.Event,
 ) -> asyncio.Server:
     """Start a Unix socket server backed by handle_client."""
-    return await asyncio.start_unix_server(
+    return await transport.serve(
         lambda r, w: handle_client(r, w, session_event),
-        path=str(sock_path),
+        sock_path,
     )
 
 
@@ -69,9 +70,9 @@ async def test_read_write_roundtrip(tmp_path: Path) -> None:
         await write_message(writer, msg)
         writer.close()
 
-    server = await asyncio.start_unix_server(echo, path=str(sock_path))
+    server = await transport.serve(echo, sock_path)
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock_path))
+        r, w = await transport.open_connection(sock_path)
         obj = {"jsonrpc": "2.0", "id": 42, "result": "pong"}
         await write_message(w, obj)
         result = await read_message(r)
@@ -117,7 +118,7 @@ async def test_ping_pong_round_trip(tmp_path: Path) -> None:
     server = await _start_server(sock_path, session_event)
 
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock_path))
+        r, w = await transport.open_connection(sock_path)
         await write_message(w, {"jsonrpc": "2.0", "id": 1, "method": "ping"})
         response = await read_message(r)
         # Assert actual bytes decoded — not a log line.
@@ -139,13 +140,13 @@ async def test_busy_on_concurrent_session(tmp_path: Path) -> None:
 
     async with server:
         # Client A acquires the session; connection stays open (owns_session=True).
-        r1, w1 = await asyncio.open_unix_connection(str(sock_path))
+        r1, w1 = await transport.open_connection(sock_path)
         await write_message(w1, {"jsonrpc": "2.0", "id": 1, "method": "session.implement"})
         resp1 = await read_message(r1)
         assert resp1.get("result", {}).get("status") == "started"
 
         # Client B: session is still active → must receive -32001.
-        r2, w2 = await asyncio.open_unix_connection(str(sock_path))
+        r2, w2 = await transport.open_connection(sock_path)
         await write_message(w2, {"jsonrpc": "2.0", "id": 2, "method": "session.implement"})
         resp2 = await read_message(r2)
         assert resp2["error"]["code"] == -32001
@@ -167,7 +168,7 @@ async def test_garbage_input_returns_parse_error(tmp_path: Path) -> None:
     server = await _start_server(sock_path, _fresh_event())
 
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock_path))
+        r, w = await transport.open_connection(sock_path)
         w.write(b"totally not json\n")
         await w.drain()
         raw = await r.readline()
@@ -187,7 +188,7 @@ async def test_missing_method_returns_invalid_request(tmp_path: Path) -> None:
     server = await _start_server(sock_path, _fresh_event())
 
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock_path))
+        r, w = await transport.open_connection(sock_path)
         # Valid JSON but no 'method' key.
         await write_message(w, {"jsonrpc": "2.0", "id": 1})
         resp = await read_message(r)
@@ -203,10 +204,10 @@ async def test_hung_client_does_not_block_others(tmp_path: Path) -> None:
 
     async with server:
         # Hung client: connect but send nothing (handle_client suspends on readline).
-        _r_hung, w_hung = await asyncio.open_unix_connection(str(sock_path))
+        _r_hung, w_hung = await transport.open_connection(sock_path)
 
         # Active client: should be served without waiting for the hung client.
-        r2, w2 = await asyncio.open_unix_connection(str(sock_path))
+        r2, w2 = await transport.open_connection(sock_path)
         await write_message(w2, {"jsonrpc": "2.0", "id": 1, "method": "ping"})
         resp = await read_message(r2)
         assert resp == {"jsonrpc": "2.0", "id": 1, "result": "pong"}
@@ -244,20 +245,12 @@ def _spawn_daemon() -> subprocess.Popen[bytes]:
 def _ping_daemon(sock: Path, timeout: float = 0.5) -> bool:
     """True iff a live daemon answers ping on *sock* (mirrors _is_daemon_alive)."""
     try:
-        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as c:
-            c.settimeout(timeout)
-            c.connect(str(sock))
-            c.sendall(b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}\n')
-            buf = b""
-            while b"\n" not in buf:
-                chunk = c.recv(4096)
-                if not chunk:
-                    break
-                buf += chunk
-        raw = json.loads(buf.split(b"\n")[0])
-        return isinstance(raw, dict) and raw.get("result") == "pong"
+        raw = transport.request_sync(
+            sock, {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}, timeout
+        )
     except (OSError, ValueError):
         return False
+    return raw.get("result") == "pong"
 
 
 def _wait_until(cond: Callable[[], bool], timeout: float = 15.0) -> bool:
@@ -325,6 +318,17 @@ def test_cold_start_second_instance_yields_to_live_daemon(
         _terminate(d1)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "Stale-endpoint recovery is a POSIX-only scenario: a socket file outlives the "
+        "process that bound it, whereas a named pipe is released by the kernel on exit, "
+        "so there is nothing to fabricate and no inode to compare. The other half of this "
+        "test — a respawn over a LIVE daemon must yield rather than orphan it — is covered "
+        "cross-platform by test_cold_start_second_instance_yields_to_live_daemon, and on "
+        "Windows the OS refuses the second bind outright (ERROR_ACCESS_DENIED)."
+    ),
+)
 def test_crash_respawn_reconnects_no_orphan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

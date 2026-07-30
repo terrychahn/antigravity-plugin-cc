@@ -34,7 +34,7 @@ _is_daemon_alive: Any = _companion._is_daemon_alive  # type: ignore[attr-defined
 _autostart_daemon: Any = _companion._autostart_daemon  # type: ignore[attr-defined]
 
 
-# ── Socket mock helper ────────────────────────────────────────────────────────
+# ── Transport mock helper ─────────────────────────────────────────────────────
 
 def _sock_mock(response: dict[str, Any]) -> MagicMock:
     """Return a MagicMock acting as a Unix socket returning *response* as JSONL."""
@@ -46,16 +46,26 @@ def _sock_mock(response: dict[str, Any]) -> MagicMock:
     return m
 
 
+def _roundtrip_mock(response: dict[str, Any]) -> MagicMock:
+    """Stand in for the companion's _roundtrip, capturing the frame it was handed.
+
+    Patched instead of ``socket.socket`` because only the POSIX branch of _roundtrip
+    uses a socket at all — on Windows the companion opens a named pipe. Framing is what
+    these tests are about, and it is identical either way.
+    """
+    return MagicMock(return_value=json.dumps(response).encode() + b"\n")
+
+
 # ── Framing round-trip ────────────────────────────────────────────────────────
 
 class TestFramingRoundTrip:
     def test_send_produces_newline_delimited_jsonrpc2(self, tmp_path) -> None:
         """Launcher writes a newline-terminated JSON-RPC 2.0 object."""
-        mock_sock = _sock_mock({"jsonrpc": "2.0", "id": 1, "result": "pong"})
-        with patch("socket.socket", return_value=mock_sock):
+        mock_rt = _roundtrip_mock({"jsonrpc": "2.0", "id": 1, "result": "pong"})
+        with patch.object(_companion, "_roundtrip", mock_rt):
             _send_rpc(tmp_path / "test.sock", "ping", {})
 
-        sent: bytes = mock_sock.sendall.call_args[0][0]
+        sent: bytes = mock_rt.call_args[0][1]
         assert sent.endswith(b"\n"), "frame must end with newline"
         msg = json.loads(sent.decode())
         assert msg["jsonrpc"] == "2.0"
@@ -67,11 +77,11 @@ class TestFramingRoundTrip:
         """ipc.read_message (daemon's parser) can consume what the launcher sends."""
         from cao.runtime.ipc import read_message
 
-        mock_sock = _sock_mock({"jsonrpc": "2.0", "id": 1, "result": "pong"})
-        with patch("socket.socket", return_value=mock_sock):
+        mock_rt = _roundtrip_mock({"jsonrpc": "2.0", "id": 1, "result": "pong"})
+        with patch.object(_companion, "_roundtrip", mock_rt):
             _send_rpc(tmp_path / "test.sock", "ping", {})
 
-        sent: bytes = mock_sock.sendall.call_args[0][0]
+        sent: bytes = mock_rt.call_args[0][1]
 
         async def _check() -> None:
             reader = asyncio.StreamReader()

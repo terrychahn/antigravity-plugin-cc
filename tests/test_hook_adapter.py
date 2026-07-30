@@ -12,6 +12,7 @@ from google.antigravity import types  # type: ignore[import-untyped]
 from google.antigravity.hooks import policy as sdk_policy  # type: ignore[import-untyped]
 
 from cao.models import ApprovalDecision, SECRET_PATH_MASK
+from cao.runtime import transport
 from cao.runtime.approval_waiter import ApprovalWaiter
 from cao.runtime.hook_adapter import (
     CAOOnSessionEndHook,
@@ -334,12 +335,12 @@ async def test_daemon_session_implement_returns_session_id(tmp_path: Path) -> No
     from cao.runtime.session_manager import SessionManager
 
     mgr = SessionManager(approval_waiter=waiter)
-    server = await asyncio.start_unix_server(
+    server = await transport.serve(
         lambda r, w: handle_client(r, w, evt, session_manager=mgr, approval_waiter=waiter),
-        path=str(sock),
+        sock,
     )
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock))
+        r, w = await transport.open_connection(sock)
         await wm(w, {"jsonrpc": "2.0", "id": 1, "method": "session.implement",
                      "params": {"slug": "test", "workspace": "/tmp", "task": "t"}})
         resp = await read_message(r)
@@ -359,12 +360,12 @@ async def test_daemon_approve_unknown_call_id_returns_32602(tmp_path: Path) -> N
     from cao.runtime.session_manager import SessionManager
 
     mgr = SessionManager(approval_waiter=waiter)
-    server = await asyncio.start_unix_server(
+    server = await transport.serve(
         lambda r, w: handle_client(r, w, evt, session_manager=mgr, approval_waiter=waiter),
-        path=str(sock),
+        sock,
     )
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock))
+        r, w = await transport.open_connection(sock)
         await wm(w, {"jsonrpc": "2.0", "id": 2, "method": "session.approve",
                      "params": {"call_id": "no-such-id"}})
         resp = await read_message(r)
@@ -383,12 +384,12 @@ async def test_daemon_approve_and_deny_round_trip(tmp_path: Path) -> None:
     from cao.runtime.session_manager import SessionManager
 
     mgr = SessionManager(approval_waiter=waiter)
-    server = await asyncio.start_unix_server(
+    server = await transport.serve(
         lambda r, w: handle_client(r, w, evt, session_manager=mgr, approval_waiter=waiter),
-        path=str(sock),
+        sock,
     )
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock))
+        r, w = await transport.open_connection(sock)
 
         future = waiter.register_pending("test-call-1")
 
@@ -420,12 +421,12 @@ async def test_daemon_status_includes_pending_approvals(tmp_path: Path) -> None:
     mgr = SessionManager(approval_waiter=waiter)
     session = await mgr.create_session("slug-stat", "/tmp", "task")
     waiter.register_pending("1", command="touch foo.sh", session_id=session.session_id)
-    server = await asyncio.start_unix_server(
+    server = await transport.serve(
         lambda r, w: handle_client(r, w, evt, session_manager=mgr, approval_waiter=waiter),
-        path=str(sock),
+        sock,
     )
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock))
+        r, w = await transport.open_connection(sock)
         await wm(w, {"jsonrpc": "2.0", "id": 1, "method": "session.status",
                      "params": {"session_id": session.session_id}})
         resp = await read_message(r)
@@ -446,12 +447,12 @@ async def test_daemon_session_wait_returns_approval(tmp_path: Path) -> None:
     mgr = SessionManager(approval_waiter=waiter)
     session = await mgr.create_session("slug-wait", "/tmp", "task")
     waiter.register_pending("1", command="touch foo.sh", session_id=session.session_id)
-    server = await asyncio.start_unix_server(
+    server = await transport.serve(
         lambda r, w: handle_client(r, w, evt, session_manager=mgr, approval_waiter=waiter),
-        path=str(sock),
+        sock,
     )
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock))
+        r, w = await transport.open_connection(sock)
         await wm(w, {"jsonrpc": "2.0", "id": 1, "method": "session.wait",
                      "params": {"session_id": session.session_id}})
         resp = await read_message(r)
@@ -476,12 +477,12 @@ async def test_daemon_approve_with_scope_persists(
     mgr = SessionManager(approval_waiter=waiter)
     session = await mgr.create_session("slug-scope", "/ws", "task")
     fut = waiter.register_pending("1", command="ls -la", session_id=session.session_id)
-    server = await asyncio.start_unix_server(
+    server = await transport.serve(
         lambda r, w: handle_client(r, w, evt, session_manager=mgr, approval_waiter=waiter),
-        path=str(sock),
+        sock,
     )
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock))
+        r, w = await transport.open_connection(sock)
         await wm(w, {"jsonrpc": "2.0", "id": 1, "method": "session.approve",
                      "params": {"call_id": "1", "scope": "project"}})
         resp = await read_message(r)
@@ -507,12 +508,12 @@ async def test_daemon_approve_default_scope_no_persist(
     mgr = SessionManager(approval_waiter=waiter)
     session = await mgr.create_session("slug-scope2", "/ws", "task")
     waiter.register_pending("1", command="ls -la", session_id=session.session_id)
-    server = await asyncio.start_unix_server(
+    server = await transport.serve(
         lambda r, w: handle_client(r, w, evt, session_manager=mgr, approval_waiter=waiter),
-        path=str(sock),
+        sock,
     )
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock))
+        r, w = await transport.open_connection(sock)
         await wm(w, {"jsonrpc": "2.0", "id": 1, "method": "session.approve",
                      "params": {"call_id": "1"}})
         resp = await read_message(r)
@@ -533,12 +534,12 @@ async def test_daemon_session_wait_returns_done(tmp_path: Path) -> None:
     mgr = SessionManager(approval_waiter=waiter)
     session = await mgr.create_session("slug-wait2", "/tmp", "task")
     mgr.transition(session.session_id, "done")
-    server = await asyncio.start_unix_server(
+    server = await transport.serve(
         lambda r, w: handle_client(r, w, evt, session_manager=mgr, approval_waiter=waiter),
-        path=str(sock),
+        sock,
     )
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock))
+        r, w = await transport.open_connection(sock)
         await wm(w, {"jsonrpc": "2.0", "id": 1, "method": "session.wait",
                      "params": {"session_id": session.session_id}})
         resp = await read_message(r)

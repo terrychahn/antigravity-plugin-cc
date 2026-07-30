@@ -14,6 +14,7 @@ from google.antigravity.models import (  # type: ignore[import-untyped]
 )
 
 from cao.models import DiffSummary, RuntimeEvent
+from cao.runtime import transport
 from cao.runtime.approval_waiter import ApprovalWaiter
 from cao.runtime.auth import AuthConfig, to_local_agent_kwargs
 from cao.runtime.daemon import handle_client
@@ -69,14 +70,14 @@ def test_no_flag_parity_is_plain_string() -> None:
 async def test_invalid_effort_rejected_pre_start(tmp_path: Path) -> None:
     sock = tmp_path / "eff.sock"
     mgr = SessionManager(approval_waiter=ApprovalWaiter())
-    server = await asyncio.start_unix_server(
+    server = await transport.serve(
         lambda r, w: handle_client(
             r, w, asyncio.Event(), session_manager=mgr, approval_waiter=ApprovalWaiter()
         ),
-        path=str(sock),
+        sock,
     )
     async with server:
-        r, w = await asyncio.open_unix_connection(str(sock))
+        r, w = await transport.open_connection(sock)
         await write_message(
             w,
             {
